@@ -1,0 +1,264 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import PIL
+import tensorflow as tf
+import pathlib
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.callbacks import ReduceLROnPlateau
+from tensorflow.keras.callbacks import ModelCheckpoint
+import math
+from tensorflow.keras.callbacks import LearningRateScheduler
+
+
+dataset_url = "https://storage.googleapis.com/download.tensorflow.org/example_images/flower_photos.tgz"
+data_dir = tf.keras.utils.get_file('flower_photos', origin=dataset_url, untar=True)
+data_dir = pathlib.Path(data_dir) / "flower_photos"
+
+
+# 設定參數
+batch_size = 32
+img_height = 180
+img_width = 180
+
+# 建立訓練資料集
+train_ds = tf.keras.utils.image_dataset_from_directory(
+    data_dir,
+    validation_split=0.2, # 將20%資料保留當驗證資料
+    subset="training",
+    seed=123,
+    image_size=(img_height, img_width),
+    batch_size=batch_size)
+
+val_ds = tf.keras.utils.image_dataset_from_directory(
+    data_dir,
+    validation_split=0.2,
+    subset="validation",
+    seed=123,
+    image_size=(img_height, img_width),
+    batch_size=batch_size)
+
+class_names = train_ds.class_names
+print(class_names)
+num_classes = len(class_names)
+
+
+# AUTOTUNE會自動選擇最佳的CPU資源配置
+AUTOTUNE = tf.data.AUTOTUNE
+# 將資料快取到記憶體，加快訓練速度
+# 每個Epoch重新打亂1000筆資料，避免固定順序學習
+# CPU提前準備下一批資料，提高GPU利用率
+train_ds = train_ds.cache().shuffle(1000).prefetch(buffer_size=AUTOTUNE)
+val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
+
+
+'''data_augmentation = keras.Sequential([
+  layers.RandomFlip("horizontal",input_shape=(img_height, img_width,3)),
+  layers.RandomRotation(0.1), # 隨機旋轉圖片(約±10%)
+  layers.RandomZoom(0.1), # 隨機縮放圖片(約±10%)
+])'''
+
+data_augmentation = keras.Sequential([
+    # 1. 空間幾何變形
+    layers.RandomFlip("horizontal", input_shape=(img_height, img_width, 3)),
+    layers.RandomRotation(0.1),  # 隨機旋轉 ±10%
+    layers.RandomZoom(0.1),      # 隨機縮放 ±10%
+
+    # 2. 顏色微調 (Color Augmentation)
+    layers.RandomBrightness(factor=0.15),  # 隨機調整亮度 (±10%)
+    layers.RandomContrast(factor=0.15),    # 隨機調整對比度 (±10%)
+])
+
+'''model = Sequential([
+ data_augmentation, # 先進行資料增強
+ layers.Rescaling(1./255, input_shape=(img_height, img_width, 3)), # 將RGB像素值由0到255縮放成0到1
+ layers.Conv2D(32, 3, padding='same', activation='relu'), # 第一層CNN
+ layers.MaxPooling2D(),# 最大池化，將圖片縮小一半減少運算量
+ layers.Conv2D(64, 3, padding='same', activation='relu'), # 第二層CNN
+ layers.MaxPooling2D(),
+ layers.Conv2D(128, 3, padding='same', activation='relu'), # 第三層CNN
+ layers.MaxPooling2D(),
+ layers.Dropout(0.2), # Dropout隨機關閉30%神經元(降低過擬合)
+ layers.Flatten(), # 將多維特徵攤平成一維向量
+ layers.Dense(128, activation='relu'),
+ layers.Dropout(0.2),
+ layers.Dense(num_classes)
+])'''
+
+'''model = Sequential([
+    data_augmentation, # 先進行資料增強
+    layers.Rescaling(1./255, input_shape=(img_height, img_width, 3)), # 將RGB像素值由0到255縮放成0到1
+
+    layers.Conv2D(32, 3, padding='same', activation='relu'), # 第一層CNN
+    tf.keras.layers.BatchNormalization(),
+    layers.MaxPooling2D(),# 最大池化，將圖片縮小一半減少運算量
+
+    layers.Conv2D(64, 3, padding='same', activation='relu'),
+    tf.keras.layers.BatchNormalization(),
+    layers.MaxPooling2D(),
+    layers.Conv2D(64, 3, padding='same', activation='relu'),
+    tf.keras.layers.BatchNormalization(),
+    layers.MaxPooling2D(),
+
+    layers.Conv2D(128, 3, padding='same', activation='relu'),
+    tf.keras.layers.BatchNormalization(),
+    layers.MaxPooling2D(),
+    layers.Conv2D(128, 3, padding='same', activation='relu'),
+    tf.keras.layers.BatchNormalization(),
+    layers.MaxPooling2D(),
+    layers.Dropout(0.2),
+
+    layers.Flatten(),
+    layers.Dense(128, activation='relu'),
+    layers.Dropout(0.2),
+    layers.Dense(num_classes)
+])'''
+
+def inception_block(x, filters):
+    # Branch 1：1×1 Conv
+    branch1 = layers.Conv2D(filters, (1,1), padding='same', activation='relu')(x)
+
+    # Branch 2：3×3 Conv
+    branch2 = layers.Conv2D(filters//2, (1,1), padding='same', activation=None)(x)
+    branch2 = layers.BatchNormalization()(branch2)
+    branch2 = layers.Activation("relu")(branch2)
+    branch2 = layers.Conv2D(filters, (3,3), padding='same', activation=None)(branch2)
+    branch2 = layers.BatchNormalization()(branch2)
+    branch2 = layers.Activation("relu")(branch2)
+
+    # Branch 3：3×1 → 1×3 (非對稱卷積)
+    branch3 = layers.Conv2D(filters, (3,1), padding='same', activation='relu')(x)
+    branch3 = layers.Conv2D(filters, (1,3), padding='same', activation='relu')(branch3)
+
+    # Branch 4：Pooling
+    branch4 = layers.MaxPooling2D(pool_size=(3,3), strides=1, padding='same')(x)
+    branch4 = layers.Conv2D(filters, (1,1), padding='same', activation='relu')(branch4)
+
+    # Concatenate
+    x = layers.Concatenate()([
+        branch1,
+        branch2,
+        branch3,
+        branch4
+    ])
+    return x
+
+
+inputs = keras.Input(shape=(img_height, img_width, 3))
+
+x = data_augmentation(inputs)
+x = layers.Rescaling(1./255)(x)
+x = layers.Conv2D(32, 5, padding='same', activation='relu')(x)
+x = layers.BatchNormalization()(x)
+x = layers.MaxPooling2D()(x)
+
+# 第二個卷積區塊
+x = layers.Conv2D(64, 5, padding='same', activation='relu')(x)
+x = layers.BatchNormalization()(x)
+x = layers.MaxPooling2D()(x)
+
+
+# 第三個卷積區塊
+# 改成 Inception Block
+x = inception_block(x, 64)
+x = layers.BatchNormalization()(x)
+x = layers.MaxPooling2D()(x)
+
+x = layers.Conv2D(128,3, padding='same', activation='relu')(x)
+x = layers.BatchNormalization()(x)
+x = layers.MaxPooling2D()(x)
+
+x = layers.Conv2D(128,3, padding='same', activation='relu')(x)
+x = layers.BatchNormalization()(x)
+x = layers.MaxPooling2D()(x)
+
+x = layers.Dropout(0.2)(x)
+x = layers.Flatten()(x)
+x = layers.Dense(128, activation='relu')(x)
+x = layers.Dropout(0.2)(x)
+outputs = layers.Dense(num_classes)(x)
+
+model = keras.Model(inputs, outputs)
+
+
+model.summary()
+
+model.compile(optimizer='adam',
+       loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+       metrics=['accuracy'])
+
+checkpoint = ModelCheckpoint(
+    'best_model.keras',
+    monitor='val_loss',
+    save_best_only=True
+)
+
+'''lr_scheduler = ReduceLROnPlateau(
+    monitor='val_loss',
+    factor=0.5,        # 每次降低為原本的 0.5 倍
+    patience=3,        # 若連續 3 個 Epoch val_loss 沒下降就觸發
+    verbose=1,
+    min_lr=1e-6        # 學習率下限
+)'''
+
+# 1. 寫一個計算當前 Epoch 學習率的數學函數
+def warmup_cosine_decay_scheduler(epoch, lr):
+    total_epochs = 50
+    warmup_epochs = 5      # 前 5 個 Epoch 做 Warmup
+    init_lr = 1e-3         # 目標最高學習率
+    min_lr = 1e-5          # 最低學習率
+
+    # 階段 1：Warmup 階段 (從 0 線性拉升至 init_lr)
+    if epoch < warmup_epochs:
+        return init_lr * (epoch + 1) / warmup_epochs
+
+    # 階段 2：Cosine Decay 餘弦退火階段
+    progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
+    cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return min_lr + (init_lr - min_lr) * cosine_decay
+
+# 2. 包裝成 Keras Callback
+lr_warmup_cosine_cb = LearningRateScheduler(warmup_cosine_decay_scheduler, verbose=1)
+
+# 在 fit 時傳入 callbacks
+history = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=50,
+    callbacks = [lr_warmup_cosine_cb, checkpoint]
+)
+
+'''epochs = 50
+history = model.fit(
+ train_ds,
+ validation_data=val_ds,
+ epochs=epochs,
+)'''
+
+
+acc = history.history['accuracy']
+val_acc = history.history['val_accuracy']
+
+loss = history.history['loss']
+val_loss = history.history['val_loss']
+
+epochs_range = range(len(acc))
+
+plt.figure(figsize=(8, 8))
+plt.subplot(1, 2, 1)
+plt.plot(epochs_range, acc, label='Training Accuracy')
+plt.plot(epochs_range, val_acc, label='Validation Accuracy')
+plt.legend(loc='lower right')
+plt.title('Training and Validation Accuracy')
+
+
+plt.subplot(1, 2, 2)
+plt.plot(epochs_range, loss, label='Training Loss')
+plt.plot(epochs_range, val_loss, label='Validation Loss')
+plt.legend(loc='upper right')
+plt.title('Training and Validation Loss')
+plt.show()
+
+loss, accuracy = model.evaluate(val_ds)
+print("Validation Accuracy:", accuracy)
