@@ -1,0 +1,63 @@
+import tensorflow as tf
+import matplotlib.pyplot as plt
+
+# 1. 載入並前處理 MNIST 資料集（轉換為 CNN 所需的 3D 格式：長、寬、通道數）
+mnist = tf.keras.datasets.mnist#指向TensorFlow內建的MNIST手寫數字資料集模組
+(x_train, y_train), (x_test, y_test) = mnist.load_data()#訓練集60000張28*28灰階影像 測試集10000張28*28
+
+
+#陣列最後面新增一個維度CNN的Conv2D規定輸入必須包含通道數(28，28)->(28，28，1)
+#這邊是1因為是灰階，如果使彩色的則是3(RGB)
+#把數值收斂到[0.0，1.0]
+x_train = x_train[..., tf.newaxis].astype("float32") / 255.0
+x_test = x_test[..., tf.newaxis].astype("float32") / 255.0
+
+
+# 2. 建立高效能的 CNN 架構
+#建立出順序序列，讓資料是一層一層向下(一個輸入一個輸出)，而非有分支的往前
+model = tf.keras.models.Sequential([
+    # 第一組卷積與池化層（學習影像中的低階特徵）
+    #建立32個卷積核(Filter又稱Kernel)，一個Filter只能學習一種模式(水平線、垂直線、曲線...等) (26*26*32)
+    #每個Filter的大小事3*3(卷積也就是將畫面中每個3*3都計算過一遍)
+    #使用ReLU函式max(0,x)引入非線性
+    #最大池化池，用於降低特徵圖的空間解析度保留重要特徵的目的每2*2區域只保留最大值(13*13*32)
+    tf.keras.layers.Conv2D(32, kernel_size=(3, 3), activation='relu', input_shape=(28, 28, 1)),
+    tf.keras.layers.MaxPooling2D(pool_size=(2, 2)),
+
+
+    # 第二組卷積與池化層（萃取更高階的數字形狀特徵）
+    #是將13*13*32一次整個進入產生11*11*1 64層完成產生64張特徵
+    #沒有設定padding時會預設padding='valid'邊緣不補零，若想要保持可以設定padding='same'
+    tf.keras.layers.Conv2D(64, kernel_size=(3, 3), padding='same', activation='relu'),#(11*11*64)
+    tf.keras.layers.MaxPooling2D(pool_size=(2, 2)),#(5*5*64)
+
+
+    # 特徵展平與全連接分類器
+    tf.keras.layers.Flatten(), #將其轉換回一維資料5*5*64=1600
+    #將不同的特徵組合轉成數值 哪些特徵組合代表某個數字
+    tf.keras.layers.Dense(128, activation='relu'),
+    # 防止過擬合(隨機關閉30%的神經元)因為每次被關閉的神經元都不同，所以模型不能依賴少數固定神經元
+    #訓練過程中有些神經元能力特別好(隨機初始化、訓練時表現好的反向傳播時權重會增加)，隨機關閉就是避免每次都只依賴這些神經元
+    tf.keras.layers.Dropout(0.3),
+    #將128個轉為10個輸出(數字0到9)MNIST的類別共有10個只又這邊的神經元是有固定意義的
+    tf.keras.layers.Dense(10, activation='softmax')
+])
+
+
+#設定訓練的方法
+"""adam相較於基本的梯度下降法擁有更強的學習效率，不再只根據眼前的梯度去做權重調整，而是加入了先前的情況
+  若多數梯度都往同一個方向就會增加改變權重的比例加速學習
+  改善:Adaptive Learning Rate 基礎梯度下降法的學習率不會變，可能因學習率過大導致一下往左一下往右
+"""
+model.compile(optimizer='adam',
+              loss='sparse_categorical_crossentropy',
+              metrics=['accuracy'])
+
+
+# 4. 訓練模型（設定訓練 10 輪）
+history = model.fit(x_train, y_train, epochs=10, validation_data=(x_test, y_test))
+
+
+# 5. 最終評估測試集準確率
+test_loss, test_acc = model.evaluate(x_test, y_test, verbose=2)
+print(f"\nCNN 模型在測試集上的 Accuracy: {test_acc * 100:.2f}%")
